@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS, cross_origin
+from flask_cors import CORS
 from werkzeug.utils import secure_filename, safe_join
 from flask_apscheduler import APScheduler
 import pandas as pd
@@ -13,20 +13,7 @@ import time
 from datetime import datetime
 
 app = Flask(__name__)
-
-# Configure CORS to allow requests from the frontend domain
-CORS(app, resources={
-    r"/api/*": {
-        "origins": [
-            "http://localhost:5000",
-            "https://gestorfacturascontrato-ubicacionbe.onrender.com",
-            "http://localhost:8000",
-            "http://127.0.0.1:5500"
-        ],
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
+CORS(app)
 
 # Configuración de carpetas
 BASE_TEMP_FOLDER = 'temp'
