@@ -120,6 +120,42 @@ def extract_contract_from_pdf(pdf_path):
     except Exception:
         return []
 
+def extract_invoice_number_from_pdf(pdf_path):
+    """Extract invoice number from PDF text, specifically looking for the factura number
+    that typically appears in red text in the upper right corner."""
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            if len(pdf.pages) > 0:
+                page = pdf.pages[0]
+                text = page.extract_text()
+                if text:
+                    # Look for patterns that match invoice numbers
+                    # Common patterns: 8-digit numbers, sometimes with prefixes
+                    patterns = [
+                        r'\bFactura[:\s]*(\d{8,})\b',  # Factura followed by numbers
+                        r'\bN[:\s]*(\d{8,})\b',        # N followed by numbers
+                        r'\b(\d{8})\b',                # Standalone 8-digit numbers
+                        r'\b(\d{9,})\b',               # 9+ digit numbers
+                    ]
+                    
+                    for pattern in patterns:
+                        matches = re.findall(pattern, text, re.IGNORECASE)
+                        if matches:
+                            # Return the first match
+                            return matches[0]
+                    
+                    # If no specific pattern found, try to find numbers in upper right area
+                    # by looking at the first few lines of text
+                    lines = text.split('\n')
+                    for i, line in enumerate(lines[:5]):  # Check first 5 lines
+                        numbers = re.findall(r'\b(\d{8,})\b', line)
+                        if numbers:
+                            return numbers[0]
+        return None
+    except Exception as e:
+        print(f"Error extracting invoice number: {e}")
+        return None
+
 @app.route('/')
 def home():
     """Endpoint raíz para verificar que el backend está vivo"""
@@ -189,6 +225,7 @@ def process_pdfs():
     
     def process_single_pdf(path, original_filename_for_display):
         candidates = list(set(extract_contract_from_pdf(path)))
+        invoice_number = extract_invoice_number_from_pdf(path)
         new_name = original_filename_for_display
         status = "No encontrado"
         ubicacion = ""
@@ -198,8 +235,14 @@ def process_pdfs():
         for contract_num in candidates:
             if contract_num in CONTRACT_MAP:
                 ubicacion = CONTRACT_MAP[contract_num]
-                base_name = os.path.splitext(original_filename_for_display)[0]
-                new_name = f"{ubicacion} - {base_name}.pdf"
+                
+                # Use invoice number if available, otherwise fall back to original filename
+                if invoice_number:
+                    new_name = f"{ubicacion} - {invoice_number}.pdf"
+                else:
+                    base_name = os.path.splitext(original_filename_for_display)[0]
+                    new_name = f"{ubicacion} - {base_name}.pdf"
+                
                 new_name = re.sub(r'[\\/*?:"<>|]', "", new_name)
                 status = "Renombrado"
                 found_contract = contract_num
@@ -231,7 +274,8 @@ def process_pdfs():
             'new_name': os.path.basename(path),
             'status': status,
             'contract': found_contract or "N/A",
-            'ubicacion': ubicacion or "N/A"
+            'ubicacion': ubicacion or "N/A",
+            'invoice_number': invoice_number or "N/A"
         }
 
     for file in uploaded_files:
@@ -303,6 +347,77 @@ def download_all():
         return send_from_directory(BASE_TEMP_FOLDER, zip_filename, as_attachment=True)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/reprocess_existing', methods=['POST'])
+def reprocess_existing_files():
+    """Reprocess existing PDF files with new naming logic to extract invoice numbers"""
+    update_activity()
+    if not CONTRACT_MAP:
+        return jsonify({'error': 'Por favor sube el archivo Excel primero.'}), 400
+    
+    results = []
+    
+    def reprocess_single_pdf(path, original_filename_for_display):
+        candidates = list(set(extract_contract_from_pdf(path)))
+        invoice_number = extract_invoice_number_from_pdf(path)
+        new_name = original_filename_for_display
+        status = "No encontrado"
+        ubicacion = ""
+        found_contract = None
+        
+        # Intentar renombrar según contrato encontrado
+        for contract_num in candidates:
+            if contract_num in CONTRACT_MAP:
+                ubicacion = CONTRACT_MAP[contract_num]
+                
+                # Use invoice number if available, otherwise fall back to original filename
+                if invoice_number:
+                    new_name = f"{ubicacion} - {invoice_number}.pdf"
+                else:
+                    base_name = os.path.splitext(original_filename_for_display)[0]
+                    new_name = f"{ubicacion} - {base_name}.pdf"
+                
+                new_name = re.sub(r'[\\/*?:"<>|]', "", new_name)
+                status = "Renombrado"
+                found_contract = contract_num
+                break
+        
+        if status != "Renombrado" and candidates:
+            status = f"Contratos {', '.join(candidates)} no están en Excel"
+        elif status != "Renombrado":
+            status = "No se detectaron contratos de 6 dígitos"
+
+        # Rename the file if it changed
+        if new_name != original_filename_for_display:
+            target_path = os.path.join(PDF_FOLDER, new_name)
+            if os.path.exists(target_path):
+                # Generate unique name if already exists
+                new_name = f"{int(time.time())}_{new_name}"
+                target_path = os.path.join(PDF_FOLDER, new_name)
+            
+            try:
+                os.rename(path, target_path)
+                path = target_path
+            except Exception as e:
+                print(f"Error al renombrar archivo: {e}")
+
+        return {
+            'original_name': original_filename_for_display,
+            'new_name': os.path.basename(path),
+            'status': status,
+            'contract': found_contract or "N/A",
+            'ubicacion': ubicacion or "N/A",
+            'invoice_number': invoice_number or "N/A"
+        }
+    
+    # Process all existing PDF files
+    for root, dirs, files in os.walk(PDF_FOLDER):
+        for filename in files:
+            if filename.lower().endswith('.pdf'):
+                file_path = os.path.join(root, filename)
+                results.append(reprocess_single_pdf(file_path, filename))
+    
+    return jsonify({'results': results})
 
 @app.route('/api/rename', methods=['POST'])
 def rename_file():
