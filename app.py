@@ -10,6 +10,7 @@ import shutil
 import glob
 import zipfile
 import time
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
@@ -34,6 +35,19 @@ scheduler.start()
 
 # Almacenamiento global para el mapeo de contratos
 CONTRACT_MAP = {}
+
+# Sistema de rastreo de actividad
+LAST_ACTIVITY_TIME = time.time()
+INACTIVITY_TIMEOUT = 15 * 60  # 15 minutos en segundos
+
+def update_activity():
+    """Actualiza el timestamp de la última actividad"""
+    global LAST_ACTIVITY_TIME
+    LAST_ACTIVITY_TIME = time.time()
+
+def is_backend_active():
+    """Verifica si el backend está activo (dentro de los 15 minutos de inactividad)"""
+    return (time.time() - LAST_ACTIVITY_TIME) < INACTIVITY_TIMEOUT
 
 def clear_folders():
     """Elimina todos los archivos de las carpetas temporales."""
@@ -106,8 +120,34 @@ def extract_contract_from_pdf(pdf_path):
     except Exception:
         return []
 
+@app.route('/')
+def home():
+    """Endpoint raíz para verificar que el backend está vivo"""
+    update_activity()
+    return jsonify({
+        'status': 'active',
+        'message': 'Backend is running',
+        'timestamp': time.time()
+    }), 200
+
+@app.route('/api/status', methods=['GET'])
+def get_status():
+    """Endpoint para verificar el estado de activación del backend"""
+    update_activity()
+    active = is_backend_active()
+    time_since_activity = time.time() - LAST_ACTIVITY_TIME
+    
+    return jsonify({
+        'active': active,
+        'last_activity': LAST_ACTIVITY_TIME,
+        'time_since_activity': time_since_activity,
+        'inactivity_timeout': INACTIVITY_TIMEOUT,
+        'timestamp': time.time()
+    }), 200
+
 @app.route('/api/upload_excel', methods=['POST'])
 def upload_excel():
+    update_activity()
     if 'excel' not in request.files:
         return jsonify({'error': 'No se encontró el archivo'}), 400
     file = request.files['excel']
@@ -128,6 +168,7 @@ def upload_excel():
 
 @app.route('/api/download_excel', methods=['GET'])
 def download_excel():
+    update_activity()
     files = os.listdir(EXCEL_FOLDER)
     if not files:
         return jsonify({'error': 'No hay archivo Excel cargado'}), 404
@@ -136,6 +177,7 @@ def download_excel():
 
 @app.route('/api/process_pdfs', methods=['POST'])
 def process_pdfs():
+    update_activity()
     if not CONTRACT_MAP:
         return jsonify({'error': 'Por favor sube el archivo Excel primero.'}), 400
         
@@ -226,6 +268,7 @@ def process_pdfs():
 
 @app.route('/api/files', methods=['GET'])
 def list_files():
+    update_activity()
     files = glob.glob(os.path.join(PDF_FOLDER, '**/*.pdf'), recursive=True)
     file_list = [{'name': os.path.basename(f)} for f in files]
     file_list.sort(key=lambda x: x['name'])
@@ -233,6 +276,7 @@ def list_files():
 
 @app.route('/api/download/<path:filename>', methods=['GET'])
 def download_file(filename):
+    update_activity()
     for root, dirs, files in os.walk(PDF_FOLDER):
         if filename in files:
             return send_from_directory(root, filename, as_attachment=not (request.args.get('preview', 'false').lower() == 'true'))
@@ -240,11 +284,13 @@ def download_file(filename):
 
 @app.route('/api/delete_all', methods=['DELETE'])
 def delete_all():
+    update_activity()
     clear_folders()
     return jsonify({'message': 'Todos los archivos eliminados'}), 200
 
 @app.route('/api/download_all', methods=['GET'])
 def download_all():
+    update_activity()
     zip_filename = "facturas_renombradas.zip"
     zip_path = os.path.join(BASE_TEMP_FOLDER, zip_filename)
     if os.path.exists(zip_path): os.remove(zip_path)
@@ -260,6 +306,7 @@ def download_all():
 
 @app.route('/api/rename', methods=['POST'])
 def rename_file():
+    update_activity()
     data = request.get_json()
     old_name, new_name = data.get('old_name'), data.get('new_name')
     if not old_name or not new_name: return jsonify({'error': 'Faltan nombres'}), 400
@@ -274,6 +321,7 @@ def rename_file():
 
 @app.route('/api/delete/<filename>', methods=['DELETE'])
 def delete_single_file(filename):
+    update_activity()
     for root, dirs, files in os.walk(PDF_FOLDER):
         if filename in files:
             try:
