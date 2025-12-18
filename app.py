@@ -49,9 +49,15 @@ def is_backend_active():
     """Verifica si el backend está activo (dentro de los 15 minutos de inactividad)"""
     return (time.time() - LAST_ACTIVITY_TIME) < INACTIVITY_TIMEOUT
 
-def clear_folders():
+def clear_folders(keep_excel=False):
     """Elimina todos los archivos de las carpetas temporales."""
-    for folder in [EXCEL_FOLDER, PDF_FOLDER]:
+    folders_to_clear = [PDF_FOLDER]
+    if not keep_excel:
+        folders_to_clear.append(EXCEL_FOLDER)
+        global CONTRACT_MAP
+        CONTRACT_MAP = {} # Solo limpiar mapa si se borra el excel
+
+    for folder in folders_to_clear:
         if os.path.exists(folder):
             for filename in os.listdir(folder):
                 file_path = os.path.join(folder, filename)
@@ -191,7 +197,11 @@ def upload_excel():
         return jsonify({'error': 'No se seleccionó ningún archivo'}), 400
     
     if file:
-        clear_folders()
+        # Al subir nuevo Excel, sí limpiamos todo (incluyendo PDFs anteriores si se desea limpieza total)
+        # O podríamos decidir limpiar solo la carpeta Excel.
+        # Asumiremos que al subir nuevo Excel se quiere reiniciar el proceso, pero limpiamos PDFs también para evitar mezclas.
+        clear_folders(keep_excel=False) 
+        
         filename = secure_filename(file.filename)
         filepath = os.path.join(EXCEL_FOLDER, filename)
         file.save(filepath)
@@ -223,10 +233,76 @@ def process_pdfs():
 
     results = []
     
-    def process_single_pdf(path, original_filename_for_display):
-        candidates = list(set(extract_contract_from_pdf(path)))
-        invoice_number = extract_invoice_number_from_pdf(path)
-        new_name = original_filename_for_display
+    # Procesar archivos ZIP primero para expandirlos a la lista de archivos
+    expanded_files = []
+    
+    # Directorio temporal para descompresión segura
+    zip_extract_base = os.path.join(BASE_TEMP_FOLDER, 'zip_extracts')
+    os.makedirs(zip_extract_base, exist_ok=True)
+
+    for file in uploaded_files:
+        if file.filename == '': continue
+        filename = secure_filename(file.filename)
+        
+        if filename.lower().endswith('.zip'):
+            try:
+                # Guardar ZIP temporalmente
+                temp_zip_path = os.path.join(zip_extract_base, f"{int(time.time())}_{filename}")
+                file.save(temp_zip_path)
+                
+                # Carpeta de extracción única
+                extract_dir = os.path.join(zip_extract_base, f"ext_{int(time.time())}_{filename}")
+                os.makedirs(extract_dir, exist_ok=True)
+                
+                with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(extract_dir)
+                
+                # Recorrer archivos extraídos
+                for root, dirs, files in os.walk(extract_dir):
+                    for f in files:
+                        if f.lower().endswith('.pdf'):
+                            # Crear un objeto similar a FileStorage o pasar la ruta directamente
+                            # Para simplificar, pasaremos la ruta absoluta del archivo extraído
+                            full_path = os.path.join(root, f)
+                            expanded_files.append({'type': 'path', 'path': full_path, 'filename': f})
+                
+                # Limpiar ZIP original, mantenemos carpeta extraída hasta procesar
+                os.remove(temp_zip_path)
+                
+            except Exception as e:
+                results.append({'original_name': filename, 'status': f"Error al procesar ZIP: {str(e)}", 'new_name': filename})
+        else:
+            # Archivo normal subido
+            expanded_files.append({'type': 'file', 'file': file, 'filename': filename})
+
+    def process_single_pdf(file_info):
+        # Preparar archivo en PDF_FOLDER
+        if file_info['type'] == 'path':
+            # Es un archivo de ZIP ya en disco
+            source_path = file_info['path']
+            original_filename = file_info['filename']
+            # Mover a carpeta PDF principal para procesar
+            target_path = os.path.join(PDF_FOLDER, original_filename)
+            
+            # Evitar colisiones
+            if os.path.exists(target_path):
+                target_path = os.path.join(PDF_FOLDER, f"{int(time.time())}_{original_filename}")
+            
+            shutil.move(source_path, target_path)
+            current_path = target_path
+            
+        else:
+            # Es un FileStorage de la request
+            file_obj = file_info['file']
+            original_filename = file_info['filename']
+            target_path = os.path.join(PDF_FOLDER, original_filename)
+            file_obj.save(target_path)
+            current_path = target_path
+
+        # Lógica de extracción y renombrado
+        candidates = list(set(extract_contract_from_pdf(current_path)))
+        invoice_number = extract_invoice_number_from_pdf(current_path)
+        new_name = original_filename
         status = "No encontrado"
         ubicacion = ""
         found_contract = None
@@ -236,11 +312,10 @@ def process_pdfs():
             if contract_num in CONTRACT_MAP:
                 ubicacion = CONTRACT_MAP[contract_num]
                 
-                # Use invoice number if available, otherwise fall back to original filename
                 if invoice_number:
                     new_name = f"{ubicacion} - {invoice_number}.pdf"
                 else:
-                    base_name = os.path.splitext(original_filename_for_display)[0]
+                    base_name = os.path.splitext(original_filename)[0]
                     new_name = f"{ubicacion} - {base_name}.pdf"
                 
                 new_name = re.sub(r'[\\/*?:"<>|]', "", new_name)
@@ -253,60 +328,46 @@ def process_pdfs():
         elif status != "Renombrado":
             status = "No se detectaron contratos de 6 dígitos"
 
-        # Asegurar que el archivo termine en la raíz de PDF_FOLDER
+        # Renombrar archivo final
         final_filename = os.path.basename(new_name)
-        target_path = os.path.join(PDF_FOLDER, final_filename)
+        final_path = os.path.join(PDF_FOLDER, final_filename)
         
-        # Si el archivo está en una subcarpeta (como al extraer de ZIP) o se cambió el nombre
-        if os.path.abspath(path) != os.path.abspath(target_path):
-            if os.path.exists(target_path):
-                # Generar nombre único si ya existe
-                target_path = os.path.join(PDF_FOLDER, f"{int(time.time())}_{final_filename}")
+        if current_path != final_path:
+            if os.path.exists(final_path):
+                final_path = os.path.join(PDF_FOLDER, f"{int(time.time())}_{final_filename}")
             
             try:
-                shutil.move(path, target_path)
-                path = target_path
+                os.rename(current_path, final_path)
+                current_path = final_path
             except Exception as e:
-                print(f"Error al mover archivo: {e}")
+                print(f"Error al renombrar: {e}")
 
         return {
-            'original_name': original_filename_for_display,
-            'new_name': os.path.basename(path),
+            'original_name': original_filename,
+            'new_name': os.path.basename(current_path),
             'status': status,
             'contract': found_contract or "N/A",
             'ubicacion': ubicacion or "N/A",
             'invoice_number': invoice_number or "N/A"
         }
 
-    for file in uploaded_files:
-        if file.filename == '': continue
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(PDF_FOLDER, filename)
-        file.save(filepath)
-        
-        if filename.lower().endswith('.zip'):
-            try:
-                with zipfile.ZipFile(filepath, 'r') as zip_ref:
-                    # Carpeta temporal única para extracción
-                    temp_id = f"extract_{int(time.time() * 1000)}"
-                    extract_path = os.path.join(PDF_FOLDER, temp_id)
-                    os.makedirs(extract_path, exist_ok=True)
-                    zip_ref.extractall(extract_path)
-                    
-                    for root, dirs, files in os.walk(extract_path):
-                        for f in files:
-                            if f.lower().endswith('.pdf'):
-                                # procesar y mover a la raíz de PDF_FOLDER
-                                results.append(process_single_pdf(os.path.join(root, f), f))
-                    
-                    # Limpiar carpeta de extracción una vez movidos los archivos
-                    shutil.rmtree(extract_path)
-                    os.remove(filepath)
-            except Exception as e:
-                results.append({'original_name': filename, 'status': f"Error ZIP: {str(e)}", 'new_name': filename})
-        
-        elif filename.lower().endswith('.pdf'):
-            results.append(process_single_pdf(filepath, filename))
+    # Procesar todos los archivos expandidos
+    for file_info in expanded_files:
+        try:
+            results.append(process_single_pdf(file_info))
+        except Exception as e:
+            results.append({
+                'original_name': file_info['filename'], 
+                'status': f"Error interno: {str(e)}", 
+                'new_name': file_info['filename']
+            })
+
+    # Limpiar carpeta temporal de zips si quedó algo
+    try:
+        if os.path.exists(zip_extract_base):
+            shutil.rmtree(zip_extract_base)
+    except:
+        pass
 
     return jsonify({'results': results})
 
@@ -329,8 +390,9 @@ def download_file(filename):
 @app.route('/api/delete_all', methods=['DELETE'])
 def delete_all():
     update_activity()
-    clear_folders()
-    return jsonify({'message': 'Todos los archivos eliminados'}), 200
+    # Modificado para mantener el Excel y el CONTRACT_MAP por defecto
+    clear_folders(keep_excel=True)
+    return jsonify({'message': 'Archivos PDF eliminados, Excel mantenido'}), 200
 
 @app.route('/api/download_all', methods=['GET'])
 def download_all():
