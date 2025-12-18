@@ -1,0 +1,8 @@
+Flask
+pandas
+openpyxl
+pdfplumber
+flask-cors
+werkzeug
+gunicorn
+Flask-APScheduler
