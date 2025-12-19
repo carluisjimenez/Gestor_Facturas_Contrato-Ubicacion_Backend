@@ -35,6 +35,8 @@ scheduler.start()
 
 # Almacenamiento global para el mapeo de contratos
 CONTRACT_MAP = {}
+IS_PROCESSING = False
+LAST_PROCESSING_SUMMARY = {'processed': 0, 'errors': 0}
 
 # Sistema de rastreo de actividad
 LAST_ACTIVITY_TIME = time.time()
@@ -230,6 +232,7 @@ def process_pdfs():
     uploaded_files = request.files.getlist('pdfs')
     if not uploaded_files:
         return jsonify({'error': 'Sin archivos'}), 400
+
     # Guardado rápido y procesamiento en segundo plano para evitar timeouts
     print(f"Recibidos {len(uploaded_files)} archivos para procesar.")
     save_errors = []
@@ -245,9 +248,16 @@ def process_pdfs():
 
     def _run_async_processing():
         try:
+            global IS_PROCESSING, LAST_PROCESSING_SUMMARY
+            IS_PROCESSING = True
             process_pending_files()
+            IS_PROCESSING = False
         except Exception as e:
+            IS_PROCESSING = False
             print(f"Error en procesamiento asíncrono: {e}")
+            LAST_PROCESSING_SUMMARY = {'processed': 0, 'errors': 1}
+        else:
+            LAST_PROCESSING_SUMMARY = {'processed': 1, 'errors': len(save_errors)}
 
     try:
         scheduler.add_job(
@@ -472,6 +482,12 @@ def process_pending_files():
             shutil.rmtree(zip_extract_base)
     except:
         pass
+    global LAST_PROCESSING_SUMMARY
+    LAST_PROCESSING_SUMMARY = {'processed': 1, 'errors': 0}
+
+@app.route('/api/processing_status', methods=['GET'])
+def processing_status():
+    return jsonify({'processing': IS_PROCESSING, 'summary': LAST_PROCESSING_SUMMARY}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
