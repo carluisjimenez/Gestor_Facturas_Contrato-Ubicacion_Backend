@@ -89,10 +89,22 @@ def extract_contract_from_excel(file_path):
     global CONTRACT_MAP
     CONTRACT_MAP = {}
     try:
-        df = pd.read_excel(file_path, sheet_name='Dueños 3rd Party')
+        # Verificar las hojas disponibles sin cargar todo el archivo
+        xls = pd.ExcelFile(file_path)
+        sheet_name = None
+
+        if 'Dueños 3rd Party' in xls.sheet_names:
+            sheet_name = 'Dueños 3rd Party'
+        elif 'CPMS' in xls.sheet_names:
+            sheet_name = 'CPMS'
+        
+        if not sheet_name:
+            return False, "No se encontró la hoja 'Dueños 3rd Party' ni 'CPMS' en el archivo."
+
+        df = pd.read_excel(file_path, sheet_name=sheet_name)
         target_ref = next((c for c in df.columns if 'referencia' in str(c).lower()), None)
         if not target_ref:
-            return False, "No se encontró la columna 'Referencia' en la hoja 'Dueños 3rd Party'."
+            return False, f"No se encontró la columna 'Referencia' en la hoja '{sheet_name}'."
 
         count = 0
         for _, row in df.iterrows():
@@ -103,7 +115,7 @@ def extract_contract_from_excel(file_path):
                 ubicacion = match.group(2).strip()
                 CONTRACT_MAP[contract_num] = ubicacion
                 count += 1
-        return True, f"Procesado exitosamente. {count} mapeos creados."
+        return True, f"Procesado exitosamente usando hoja '{sheet_name}'. {count} mapeos creados."
     except Exception as e:
         return False, str(e)
 
